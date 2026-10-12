@@ -1,0 +1,814 @@
+import javax.swing.*;
+import javax.swing.border.*;
+import javax.swing.table.DefaultTableModel;
+import java.awt.*;
+import java.awt.event.*;
+import java.io.*;
+import java.util.*;
+
+class Accounting implements Serializable {
+    private static final long serialVersionUID = 1L;
+
+    String Accno;
+    String Name;
+    Double balance;
+    String pin; // 4-digit PIN, null until the user sets one
+
+    Accounting() {}
+
+    Accounting(String a, String b, Double c) {
+        Accno = a;
+        Name = b;
+        balance = c;
+    }
+
+    boolean hasPin() {
+        return pin != null && !pin.isEmpty();
+    }
+
+    boolean checkPin(String entered) {
+        return hasPin() && pin.equals(entered);
+    }
+
+    public String toString() {
+        return "Account no.= " + Accno + "\nName= " + Name + "\nBalance= " + balance
+                + "\nPIN set= " + (hasPin() ? "Yes" : "No");
+    }
+}
+
+public class BankApp extends JFrame {
+
+    // ---- Palette: deep ledger-navy + warm brass accent, kept deliberately quiet ----
+    private static final Color NAVY        = new Color(0x14, 0x2B, 0x45);
+    private static final Color NAVY_DARK   = new Color(0x0E, 0x1F, 0x33);
+    private static final Color NAVY_HOVER  = new Color(0x1E, 0x3A, 0x5C);
+    private static final Color BRASS       = new Color(0xC0, 0x9A, 0x4B);
+    private static final Color CANVAS      = new Color(0xF6, 0xF4, 0xEF);
+    private static final Color CARD_WHITE  = Color.WHITE;
+    private static final Color INK         = new Color(0x22, 0x22, 0x22);
+    private static final Color MUTED       = new Color(0x6E, 0x6E, 0x6E);
+    private static final Color DANGER      = new Color(0xA6, 0x3D, 0x33);
+    private static final Color LINE        = new Color(0xE1, 0xDD, 0xD3);
+
+    private static final Font FONT_DISPLAY = new Font("Georgia", Font.BOLD, 26);
+    private static final Font FONT_HEADING = new Font("Georgia", Font.BOLD, 18);
+    private static final Font FONT_LABEL   = new Font("Segoe UI", Font.PLAIN, 14);
+    private static final Font FONT_BODY    = new Font("Segoe UI", Font.PLAIN, 14);
+    private static final Font FONT_BUTTON  = new Font("Segoe UI", Font.BOLD, 14);
+    private static final Font FONT_MONO    = new Font("Consolas", Font.PLAIN, 14);
+
+    // Portable across any machine/OS: lives under the current user's home folder,
+    // e.g. C:\Users\<you>\ABCBank\accounts.dat on Windows or ~/ABCBank/accounts.dat on Mac/Linux.
+    private static final String FILE_PATH =
+            System.getProperty("user.home") + File.separator + "ABCBank" + File.separator + "accounts.dat";
+
+    private final LinkedHashMap<String, Accounting> hm = new LinkedHashMap<>();
+
+    private final CardLayout cardLayout = new CardLayout();
+    private final JPanel content = new JPanel(cardLayout);
+
+    private JLabel statusLabel;
+    private JLabel homeCountValue, homeBalanceValue;
+    private DefaultTableModel tableModel;
+
+    public BankApp() {
+        super("ABC Bank - Account Management");
+        loadAccounts();
+
+        setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
+        addWindowListener(new WindowAdapter() {
+            public void windowClosing(WindowEvent e) {
+                handleExit();
+            }
+        });
+
+        setLayout(new BorderLayout());
+        getContentPane().setBackground(CANVAS);
+
+        add(buildSidebar(), BorderLayout.WEST);
+        add(buildContentArea(), BorderLayout.CENTER);
+        add(buildStatusBar(), BorderLayout.SOUTH);
+
+        setSize(920, 600);
+        setMinimumSize(new Dimension(820, 540));
+        setLocationRelativeTo(null);
+
+        refreshHomeStats();
+    }
+
+    // ---------------------------------------------------------------- sidebar
+
+    private JComponent buildSidebar() {
+        JPanel sidebar = new JPanel();
+        sidebar.setLayout(new BoxLayout(sidebar, BoxLayout.Y_AXIS));
+        sidebar.setBackground(NAVY);
+        sidebar.setBorder(new EmptyBorder(24, 20, 24, 20));
+        sidebar.setPreferredSize(new Dimension(220, 0));
+
+        JLabel brand = new JLabel("ABC BANK");
+        brand.setFont(FONT_DISPLAY);
+        brand.setForeground(Color.WHITE);
+        brand.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JLabel sub = new JLabel("Account Ledger");
+        sub.setFont(FONT_LABEL);
+        sub.setForeground(BRASS);
+        sub.setAlignmentX(Component.LEFT_ALIGNMENT);
+        sub.setBorder(new EmptyBorder(2, 2, 28, 0));
+
+        sidebar.add(brand);
+        sidebar.add(sub);
+
+        sidebar.add(navButton("Dashboard", () -> cardLayout.show(content, "HOME")));
+        sidebar.add(Box.createVerticalStrut(6));
+        sidebar.add(navButton("Open Account", () -> cardLayout.show(content, "CREATE")));
+        sidebar.add(Box.createVerticalStrut(6));
+        sidebar.add(navButton("Close Account", () -> cardLayout.show(content, "DELETE")));
+        sidebar.add(Box.createVerticalStrut(6));
+        sidebar.add(navButton("Deposit", () -> cardLayout.show(content, "DEPOSIT")));
+        sidebar.add(Box.createVerticalStrut(6));
+        sidebar.add(navButton("Withdraw", () -> cardLayout.show(content, "WITHDRAW")));
+        sidebar.add(Box.createVerticalStrut(6));
+        sidebar.add(navButton("Set PIN", () -> cardLayout.show(content, "SETPIN")));
+        sidebar.add(Box.createVerticalStrut(6));
+        sidebar.add(navButton("Find Account", () -> cardLayout.show(content, "VIEW")));
+        sidebar.add(Box.createVerticalStrut(6));
+        sidebar.add(navButton("All Accounts", () -> {
+            refreshTable();
+            cardLayout.show(content, "VIEWALL");
+        }));
+
+        sidebar.add(Box.createVerticalGlue());
+
+        JButton saveBtn = navButton("Save Ledger", () -> saveAccounts(true));
+        sidebar.add(saveBtn);
+        sidebar.add(Box.createVerticalStrut(6));
+        JButton exitBtn = navButton("Exit", this::handleExit);
+        sidebar.add(exitBtn);
+
+        return sidebar;
+    }
+
+    private JButton navButton(String text, Runnable action) {
+        JButton b = new JButton(text);
+        b.setFont(FONT_BUTTON);
+        b.setForeground(Color.WHITE);
+        b.setBackground(NAVY);
+        b.setAlignmentX(Component.LEFT_ALIGNMENT);
+        b.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
+        b.setHorizontalAlignment(SwingConstants.LEFT);
+        b.setBorder(new EmptyBorder(8, 10, 8, 10));
+        b.setFocusPainted(false);
+        b.setContentAreaFilled(true);
+        b.setBorderPainted(false);
+        b.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        b.addMouseListener(new MouseAdapter() {
+            public void mouseEntered(MouseEvent e) { b.setBackground(NAVY_HOVER); }
+            public void mouseExited(MouseEvent e) { b.setBackground(NAVY); }
+        });
+        b.addActionListener(e -> action.run());
+        return b;
+    }
+
+    // ------------------------------------------------------------ status bar
+
+    private JComponent buildStatusBar() {
+        statusLabel = new JLabel("Ready.");
+        statusLabel.setFont(FONT_LABEL);
+        statusLabel.setForeground(MUTED);
+        statusLabel.setBorder(new EmptyBorder(8, 16, 8, 16));
+        JPanel wrap = new JPanel(new BorderLayout());
+        wrap.setBackground(CARD_WHITE);
+        wrap.setBorder(new MatteBorder(1, 0, 0, 0, LINE));
+        wrap.add(statusLabel, BorderLayout.WEST);
+        return wrap;
+    }
+
+    private void setStatus(String text) {
+        statusLabel.setText(text);
+    }
+
+    // --------------------------------------------------------- content area
+
+    private JComponent buildContentArea() {
+        content.setBorder(new EmptyBorder(28, 32, 28, 32));
+        content.setBackground(CANVAS);
+
+        content.add(buildHomePanel(), "HOME");
+        content.add(buildCreatePanel(), "CREATE");
+        content.add(buildDeletePanel(), "DELETE");
+        content.add(buildDepositPanel(), "DEPOSIT");
+        content.add(buildWithdrawPanel(), "WITHDRAW");
+        content.add(buildSetPinPanel(), "SETPIN");
+        content.add(buildViewPanel(), "VIEW");
+        content.add(buildViewAllPanel(), "VIEWALL");
+
+        return content;
+    }
+
+    private JPanel sectionHeader(String title, String subtitle) {
+        JPanel p = new JPanel();
+        p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
+        p.setBackground(CANVAS);
+        p.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JLabel h = new JLabel(title);
+        h.setFont(FONT_HEADING);
+        h.setForeground(INK);
+        h.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JLabel s = new JLabel(subtitle);
+        s.setFont(FONT_LABEL);
+        s.setForeground(MUTED);
+        s.setAlignmentX(Component.LEFT_ALIGNMENT);
+        s.setBorder(new EmptyBorder(4, 0, 20, 0));
+
+        p.add(h);
+        p.add(s);
+        return p;
+    }
+
+    // ------------------------------------------------------------- HOME tab
+
+    private JPanel buildHomePanel() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBackground(CANVAS);
+
+        panel.add(sectionHeader("Dashboard", "A quick look at the ledger."));
+
+        JPanel cards = new JPanel(new GridLayout(1, 2, 20, 0));
+        cards.setBackground(CANVAS);
+        cards.setAlignmentX(Component.LEFT_ALIGNMENT);
+        cards.setMaximumSize(new Dimension(600, 120));
+
+        homeCountValue = new JLabel("0");
+        cards.add(statCard("Open Accounts", homeCountValue));
+
+        homeBalanceValue = new JLabel("0.00");
+        cards.add(statCard("Total Balance", homeBalanceValue));
+
+        panel.add(cards);
+        panel.add(Box.createVerticalStrut(28));
+
+        JLabel hint = new JLabel("Use the panel on the left to open, close, deposit, withdraw, set a PIN, find, or list accounts.");
+        hint.setFont(FONT_BODY);
+        hint.setForeground(MUTED);
+        hint.setAlignmentX(Component.LEFT_ALIGNMENT);
+        panel.add(hint);
+
+        return panel;
+    }
+
+    private JPanel statCard(String label, JLabel valueLabel) {
+        JPanel card = new JPanel();
+        card.setLayout(new BoxLayout(card, BoxLayout.Y_AXIS));
+        card.setBackground(CARD_WHITE);
+        card.setBorder(new CompoundBorder(new LineBorder(LINE, 1), new EmptyBorder(18, 20, 18, 20)));
+
+        JLabel l = new JLabel(label);
+        l.setFont(FONT_LABEL);
+        l.setForeground(MUTED);
+
+        valueLabel.setFont(new Font("Georgia", Font.BOLD, 30));
+        valueLabel.setForeground(NAVY);
+        valueLabel.setBorder(new EmptyBorder(6, 0, 0, 0));
+
+        card.add(l);
+        card.add(valueLabel);
+        return card;
+    }
+
+    private void refreshHomeStats() {
+        homeCountValue.setText(String.valueOf(hm.size()));
+        double total = 0;
+        for (Accounting a : hm.values()) {
+            if (a.balance != null) total += a.balance;
+        }
+        homeBalanceValue.setText(String.format("%.2f", total));
+    }
+
+    // ----------------------------------------------------------- CREATE tab
+
+    private JTextField createAccno, createName, createBalance;
+
+    private JPanel buildCreatePanel() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBackground(CANVAS);
+        panel.add(sectionHeader("Open Account", "Add a new account to the ledger."));
+
+        JPanel form = formCard();
+
+        createAccno = labeledField(form, "Account number");
+        createName = labeledField(form, "Account holder name");
+        createBalance = labeledField(form, "Opening balance");
+
+        JButton submit = primaryButton("Open Account");
+        submit.addActionListener(e -> {
+            String accno = createAccno.getText().trim();
+            String name = createName.getText().trim();
+            String balanceText = createBalance.getText().trim();
+
+            if (accno.isEmpty() || name.isEmpty() || balanceText.isEmpty()) {
+                setStatus("Enter account number, name, and balance before saving.");
+                return;
+            }
+            if (hm.containsKey(accno)) {
+                setStatus("Account " + accno + " already exists. Choose a different number.");
+                return;
+            }
+            double balance;
+            try {
+                balance = Double.parseDouble(balanceText);
+            } catch (NumberFormatException ex) {
+                setStatus("Balance must be a number.");
+                return;
+            }
+
+            Accounting acc = new Accounting(accno, name, balance);
+            hm.put(accno, acc);
+            refreshHomeStats();
+            createAccno.setText("");
+            createName.setText("");
+            createBalance.setText("");
+            setStatus("Account opened for " + name + " (No. " + accno + ").");
+        });
+
+        JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        actions.setBackground(CARD_WHITE);
+        actions.setBorder(new EmptyBorder(10, 0, 0, 0));
+        actions.add(submit);
+        form.add(actions);
+
+        panel.add(form);
+        return panel;
+    }
+
+    // ----------------------------------------------------------- DELETE tab
+
+    private JTextField deleteAccno;
+
+    private JPanel buildDeletePanel() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBackground(CANVAS);
+        panel.add(sectionHeader("Close Account", "Remove an account from the ledger."));
+
+        JPanel form = formCard();
+        deleteAccno = labeledField(form, "Account number");
+
+        JButton submit = dangerButton("Close Account");
+        submit.addActionListener(e -> {
+            String accno = deleteAccno.getText().trim();
+            if (accno.isEmpty()) {
+                setStatus("Enter an account number to close.");
+                return;
+            }
+            Accounting removed = hm.remove(accno);
+            if (removed != null) {
+                refreshHomeStats();
+                deleteAccno.setText("");
+                setStatus("Account " + accno + " (" + removed.Name + ") closed.");
+            } else {
+                setStatus("Account " + accno + " was not found.");
+            }
+        });
+
+        JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        actions.setBackground(CARD_WHITE);
+        actions.setBorder(new EmptyBorder(10, 0, 0, 0));
+        actions.add(submit);
+        form.add(actions);
+
+        panel.add(form);
+        return panel;
+    }
+
+    // ---------------------------------------------------------- DEPOSIT tab
+
+    private JTextField depositAccno, depositAmount;
+
+    private JPanel buildDepositPanel() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBackground(CANVAS);
+        panel.add(sectionHeader("Deposit Money", "Add funds to an existing account."));
+
+        JPanel form = formCard();
+        depositAccno = labeledField(form, "Account number");
+        depositAmount = labeledField(form, "Amount to deposit");
+
+        JButton submit = primaryButton("Deposit");
+        submit.addActionListener(e -> {
+            String accno = depositAccno.getText().trim();
+            String amountText = depositAmount.getText().trim();
+
+            if (accno.isEmpty() || amountText.isEmpty()) {
+                setStatus("Enter an account number and an amount.");
+                return;
+            }
+            Accounting acc = hm.get(accno);
+            if (acc == null) {
+                setStatus("Account " + accno + " was not found.");
+                return;
+            }
+            double amount;
+            try {
+                amount = Double.parseDouble(amountText);
+            } catch (NumberFormatException ex) {
+                setStatus("Amount must be a number.");
+                return;
+            }
+            if (amount <= 0) {
+                setStatus("Amount must be greater than zero.");
+                return;
+            }
+
+            acc.balance += amount;
+            refreshHomeStats();
+            depositAmount.setText("");
+            setStatus(String.format("Deposited %.2f into account %s. New balance: %.2f",
+                    amount, accno, acc.balance));
+        });
+
+        JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        actions.setBackground(CARD_WHITE);
+        actions.setBorder(new EmptyBorder(10, 0, 0, 0));
+        actions.add(submit);
+        form.add(actions);
+
+        panel.add(form);
+        return panel;
+    }
+
+    // --------------------------------------------------------- WITHDRAW tab
+
+    private JTextField withdrawAccno, withdrawAmount;
+    private JPasswordField withdrawPin;
+
+    private JPanel buildWithdrawPanel() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBackground(CANVAS);
+        panel.add(sectionHeader("Withdraw Money", "Requires the account's 4-digit PIN."));
+
+        JPanel form = formCard();
+        withdrawAccno = labeledField(form, "Account number");
+        withdrawPin = labeledPasswordField(form, "4-digit PIN");
+        withdrawAmount = labeledField(form, "Amount to withdraw");
+
+        JButton submit = dangerButton("Withdraw");
+        submit.addActionListener(e -> {
+            String accno = withdrawAccno.getText().trim();
+            String pin = new String(withdrawPin.getPassword()).trim();
+            String amountText = withdrawAmount.getText().trim();
+
+            if (accno.isEmpty() || pin.isEmpty() || amountText.isEmpty()) {
+                setStatus("Enter account number, PIN, and amount.");
+                return;
+            }
+            Accounting acc = hm.get(accno);
+            if (acc == null) {
+                setStatus("Account " + accno + " was not found.");
+                return;
+            }
+            if (!acc.hasPin()) {
+                setStatus("No PIN set for account " + accno + ". Set one under 'Set PIN' first.");
+                return;
+            }
+            if (!acc.checkPin(pin)) {
+                setStatus("Incorrect PIN for account " + accno + ".");
+                withdrawPin.setText("");
+                return;
+            }
+            double amount;
+            try {
+                amount = Double.parseDouble(amountText);
+            } catch (NumberFormatException ex) {
+                setStatus("Amount must be a number.");
+                return;
+            }
+            if (amount <= 0) {
+                setStatus("Amount must be greater than zero.");
+                return;
+            }
+            if (amount > acc.balance) {
+                setStatus(String.format("Insufficient balance. Available: %.2f", acc.balance));
+                return;
+            }
+
+            acc.balance -= amount;
+            refreshHomeStats();
+            withdrawAmount.setText("");
+            withdrawPin.setText("");
+            setStatus(String.format("Withdrew %.2f from account %s. New balance: %.2f",
+                    amount, accno, acc.balance));
+        });
+
+        JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        actions.setBackground(CARD_WHITE);
+        actions.setBorder(new EmptyBorder(10, 0, 0, 0));
+        actions.add(submit);
+        form.add(actions);
+
+        panel.add(form);
+        return panel;
+    }
+
+    // ---------------------------------------------------------- SET PIN tab
+
+    private JTextField setPinAccno;
+    private JPasswordField setPinNew, setPinConfirm;
+
+    private JPanel buildSetPinPanel() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBackground(CANVAS);
+        panel.add(sectionHeader("Set / Update PIN", "A 4-digit PIN is required before withdrawing."));
+
+        JPanel form = formCard();
+        setPinAccno = labeledField(form, "Account number");
+        setPinNew = labeledPasswordField(form, "New 4-digit PIN");
+        setPinConfirm = labeledPasswordField(form, "Confirm PIN");
+
+        JButton submit = primaryButton("Save PIN");
+        submit.addActionListener(e -> {
+            String accno = setPinAccno.getText().trim();
+            String newPin = new String(setPinNew.getPassword()).trim();
+            String confirmPin = new String(setPinConfirm.getPassword()).trim();
+
+            if (accno.isEmpty() || newPin.isEmpty() || confirmPin.isEmpty()) {
+                setStatus("Enter account number, new PIN, and confirmation.");
+                return;
+            }
+            Accounting acc = hm.get(accno);
+            if (acc == null) {
+                setStatus("Account " + accno + " was not found.");
+                return;
+            }
+            if (!newPin.matches("\\d{4}")) {
+                setStatus("PIN must be exactly 4 digits.");
+                return;
+            }
+            if (!newPin.equals(confirmPin)) {
+                setStatus("PIN and confirmation do not match.");
+                return;
+            }
+
+            acc.pin = newPin;
+            setPinNew.setText("");
+            setPinConfirm.setText("");
+            setStatus("PIN set for account " + accno + ".");
+        });
+
+        JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        actions.setBackground(CARD_WHITE);
+        actions.setBorder(new EmptyBorder(10, 0, 0, 0));
+        actions.add(submit);
+        form.add(actions);
+
+        panel.add(form);
+        return panel;
+    }
+
+    // ------------------------------------------------------------- VIEW tab
+
+    private JTextField viewAccno;
+    private JTextArea viewResult;
+
+    private JPanel buildViewPanel() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBackground(CANVAS);
+        panel.add(sectionHeader("Find Account", "Look up a single account by number."));
+
+        JPanel form = formCard();
+        viewAccno = labeledField(form, "Account number");
+
+        JButton submit = primaryButton("Find Account");
+
+        viewResult = new JTextArea(5, 30);
+        viewResult.setEditable(false);
+        viewResult.setFont(FONT_MONO);
+        viewResult.setBackground(CANVAS);
+        viewResult.setBorder(new CompoundBorder(new LineBorder(LINE, 1), new EmptyBorder(14, 16, 14, 16)));
+        viewResult.setText("No account looked up yet.");
+
+        submit.addActionListener(e -> {
+            String accno = viewAccno.getText().trim();
+            if (accno.isEmpty()) {
+                setStatus("Enter an account number to search.");
+                return;
+            }
+            Accounting acc = hm.get(accno);
+            if (acc != null) {
+                viewResult.setText(acc.toString());
+                setStatus("Showing account " + accno + ".");
+            } else {
+                viewResult.setText("Account number not found.");
+                setStatus("Account " + accno + " was not found.");
+            }
+        });
+
+        JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        actions.setBackground(CARD_WHITE);
+        actions.setBorder(new EmptyBorder(10, 0, 20, 0));
+        actions.add(submit);
+        form.add(actions);
+        form.add(viewResult);
+
+        panel.add(form);
+        return panel;
+    }
+
+    // --------------------------------------------------------- VIEW ALL tab
+
+    private JPanel buildViewAllPanel() {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBackground(CANVAS);
+
+        JPanel header = sectionHeader("All Accounts", "Every account currently in the ledger.");
+        panel.add(header, BorderLayout.NORTH);
+
+        tableModel = new DefaultTableModel(new Object[]{"Account No.", "Name", "Balance"}, 0) {
+            public boolean isCellEditable(int row, int col) { return false; }
+        };
+        JTable table = new JTable(tableModel);
+        table.setFont(FONT_BODY);
+        table.setRowHeight(28);
+        table.getTableHeader().setFont(FONT_BUTTON);
+        table.getTableHeader().setBackground(NAVY);
+        table.getTableHeader().setForeground(Color.WHITE);
+        table.setSelectionBackground(new Color(0xEF, 0xE7, 0xD3));
+        table.setGridColor(LINE);
+
+        JScrollPane scroll = new JScrollPane(table);
+        scroll.setBorder(new LineBorder(LINE, 1));
+        panel.add(scroll, BorderLayout.CENTER);
+
+        JButton refresh = primaryButton("Refresh");
+        refresh.addActionListener(e -> refreshTable());
+        JPanel south = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        south.setBackground(CANVAS);
+        south.setBorder(new EmptyBorder(14, 0, 0, 0));
+        south.add(refresh);
+        panel.add(south, BorderLayout.SOUTH);
+
+        return panel;
+    }
+
+    private void refreshTable() {
+        tableModel.setRowCount(0);
+        for (Accounting a : hm.values()) {
+            tableModel.addRow(new Object[]{a.Accno, a.Name, String.format("%.2f", a.balance)});
+        }
+        refreshHomeStats();
+    }
+
+    // -------------------------------------------------------- form helpers
+
+    private JPanel formCard() {
+        JPanel form = new JPanel();
+        form.setLayout(new BoxLayout(form, BoxLayout.Y_AXIS));
+        form.setBackground(CARD_WHITE);
+        form.setBorder(new CompoundBorder(new LineBorder(LINE, 1), new EmptyBorder(24, 24, 24, 24)));
+        form.setAlignmentX(Component.LEFT_ALIGNMENT);
+        form.setMaximumSize(new Dimension(480, 1000));
+        return form;
+    }
+
+    private JTextField labeledField(JPanel parent, String labelText) {
+        JLabel label = new JLabel(labelText);
+        label.setFont(FONT_LABEL);
+        label.setForeground(INK);
+        label.setAlignmentX(Component.LEFT_ALIGNMENT);
+        label.setBorder(new EmptyBorder(0, 0, 4, 0));
+
+        JTextField field = new JTextField();
+        field.setFont(FONT_BODY);
+        field.setAlignmentX(Component.LEFT_ALIGNMENT);
+        field.setMaximumSize(new Dimension(Integer.MAX_VALUE, 34));
+        field.setBorder(new CompoundBorder(new LineBorder(LINE, 1), new EmptyBorder(6, 10, 6, 10)));
+
+        parent.add(label);
+        parent.add(field);
+        parent.add(Box.createVerticalStrut(16));
+        return field;
+    }
+
+    private JPasswordField labeledPasswordField(JPanel parent, String labelText) {
+        JLabel label = new JLabel(labelText);
+        label.setFont(FONT_LABEL);
+        label.setForeground(INK);
+        label.setAlignmentX(Component.LEFT_ALIGNMENT);
+        label.setBorder(new EmptyBorder(0, 0, 4, 0));
+
+        JPasswordField field = new JPasswordField();
+        field.setFont(FONT_BODY);
+        field.setAlignmentX(Component.LEFT_ALIGNMENT);
+        field.setMaximumSize(new Dimension(Integer.MAX_VALUE, 34));
+        field.setBorder(new CompoundBorder(new LineBorder(LINE, 1), new EmptyBorder(6, 10, 6, 10)));
+
+        parent.add(label);
+        parent.add(field);
+        parent.add(Box.createVerticalStrut(16));
+        return field;
+    }
+
+    private JButton primaryButton(String text) {
+        JButton b = new JButton(text);
+        b.setFont(FONT_BUTTON);
+        b.setForeground(Color.WHITE);
+        b.setBackground(NAVY);
+        b.setFocusPainted(false);
+        b.setBorder(new EmptyBorder(10, 22, 10, 22));
+        b.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        return b;
+    }
+
+    private JButton dangerButton(String text) {
+        JButton b = primaryButton(text);
+        b.setBackground(DANGER);
+        return b;
+    }
+
+    // ----------------------------------------------------------- file logic
+
+    private void loadAccounts() {
+        File file = new File(FILE_PATH);
+        if (!file.exists() || file.length() == 0) {
+            return; // fresh start
+        }
+        try (FileInputStream fis = new FileInputStream(file);
+             ObjectInputStream ois = new ObjectInputStream(fis)) {
+
+            int count = ois.readInt();
+            for (int i = 0; i < count; i++) {
+                Accounting acc = (Accounting) ois.readObject();
+                hm.put(acc.Accno, acc);
+            }
+        } catch (EOFException ex) {
+            // empty/short file - start fresh
+        } catch (IOException | ClassNotFoundException ex) {
+            JOptionPane.showMessageDialog(this,
+                    "Could not read the existing ledger file:\n" + ex.getMessage(),
+                    "Load error", JOptionPane.WARNING_MESSAGE);
+        }
+    }
+
+    private void saveAccounts(boolean announce) {
+        File file = new File(FILE_PATH);
+        File parent = file.getParentFile();
+        if (parent != null && !parent.exists()) {
+            parent.mkdirs();
+        }
+        try (FileOutputStream fos = new FileOutputStream(file);
+             ObjectOutputStream oos = new ObjectOutputStream(fos)) {
+
+            oos.writeInt(hm.size());
+            for (Accounting a : hm.values()) {
+                oos.writeObject(a);
+            }
+            oos.flush();
+            if (announce) {
+                setStatus("Ledger saved to " + FILE_PATH);
+            }
+        } catch (IOException ex) {
+            JOptionPane.showMessageDialog(this,
+                    "Could not save the ledger:\n" + ex.getMessage(),
+                    "Save error", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private void handleExit() {
+        int choice = JOptionPane.showConfirmDialog(this,
+                "Save the ledger before exiting?",
+                "Exit ABC Bank",
+                JOptionPane.YES_NO_CANCEL_OPTION,
+                JOptionPane.QUESTION_MESSAGE);
+
+        if (choice == JOptionPane.YES_OPTION) {
+            saveAccounts(false);
+            dispose();
+            System.exit(0);
+        } else if (choice == JOptionPane.NO_OPTION) {
+            dispose();
+            System.exit(0);
+        }
+        // CANCEL_OPTION: do nothing, stay open
+    }
+
+    // ---------------------------------------------------------------- main
+
+    public static void main(String[] args) {
+        try {
+            UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
+        } catch (Exception ignored) {
+        }
+        SwingUtilities.invokeLater(() -> {
+            BankApp app = new BankApp();
+            app.setVisible(true);
+        });
+    }
+}
